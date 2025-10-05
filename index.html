@@ -20,9 +20,9 @@
   <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
   <script src="https://unpkg.com/three@0.160.0/examples/js/controls/PointerLockControls.js"></script>
   <!-- Photon Realtime JavaScript SDK -->
-  <script src="https://download.photonengine.com/Photon-Javascript_SDK/Photon-Javascript_SDK-4.1.2/lib/Photon-Javascript_SDK.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/photon-javascript@4.1.7/dist/web/Photon-Javascript_SDK.min.js"></script>
   <!-- Agora Web SDK NG -->
-  <script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/agora-rtc-sdk-ng@4.20.2/AgoraRTC_N.js"></script>
 </head>
 <body>
   <div id="ui">
@@ -174,7 +174,7 @@
     async function enableMic(){ await localAudioTrack.setEnabled(true); document.getElementById('micIndicator').classList.add('live'); }
     async function disableMic(){ await localAudioTrack.setEnabled(false); document.getElementById('micIndicator').classList.remove('live'); }
 
-    return { join, leave, setPeerPose, setListenerPose, setProximityGain, enableMic, disableMic };
+    async function _resumeCtx(){ try{ await ctx.resume(); }catch(e){} } return { join, leave, setPeerPose, setListenerPose, setProximityGain, enableMic, disableMic, _resumeCtx };
   })();
 
   // ====== NETWORK (Photon Realtime JS) ======
@@ -225,11 +225,7 @@
   const micBtn = document.getElementById('micBtn');
   const rangeInput = document.getElementById('range');
 
-  joinBtn.onclick = async ()=>{
-    const room = roomInput.value.trim() || 'sector1';
-    net.join(room);
-    try{ await voice.join(room); }catch(e){ log('Agora error: '+e.message); }
-  };
+  joinBtn.onclick = async ()=>{ const room = roomInput.value.trim() || 'sector1'; try{ if (voice && voice._resumeCtx) { await voice._resumeCtx(); } } catch(e) { console.warn('AudioContext resume issue', e); } net.join(room); try{ await voice.join(room); }catch(e){ log('Agora error: '+e.message); console.error(e); } };
   leaveBtn.onclick = async ()=>{ net.leave(); await voice.leave(); };
 
   micBtn.onclick = async ()=>{
