@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ALYSSIUN LITE — Shared Space (Photon Realtime JS + Agora Voice)</title>
+  <style>
+    html, body { margin:0; height:100%; background:#060913; color:#E8ECFF; font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
+    #ui { position:fixed; top:12px; left:12px; right:12px; display:flex; gap:12px; align-items:center; z-index:10; flex-wrap:wrap }
+    .card { background:rgba(13,18,36,.75); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:10px 12px; box-shadow:0 8px 30px rgba(0,0,0,.25); display:flex; gap:10px; align-items:center }
+    label { font-size:12px; opacity:.8 }
+    input, button, select { background:#0B0F24; border:1px solid rgba(255,255,255,.12); color:#E8ECFF; border-radius:10px; padding:8px 10px; font-size:14px }
+    button.primary { background:#4C6FFF; border-color:#4C6FFF; font-weight:700 }
+    #log { position:fixed; bottom:12px; left:12px; right:12px; max-height:30vh; overflow:auto; font-size:12px; opacity:.8 }
+    canvas { display:block }
+    #micIndicator { width:8px; height:8px; border-radius:50%; background:#EA4335; box-shadow:0 0 0 3px rgba(234,67,53,.15) }
+    #micIndicator.live { background:#34A853; box-shadow:0 0 0 3px rgba(52,168,83,.18) }
+  </style>
+  <!-- Three.js -->
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.160.0/examples/js/controls/PointerLockControls.js"></script>
+  <!-- Photon Realtime JavaScript SDK -->
+  <script src="https://download.photonengine.com/Photon-Javascript_SDK/Photon-Javascript_SDK-4.1.2/lib/Photon-Javascript_SDK.min.js"></script>
+  <!-- Agora Web SDK NG -->
+  <script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
+</head>
+<body>
+  <div id="ui">
+    <div class="card">
+      <strong>ALYSSIUN LITE</strong>
+      <span style="opacity:.6">| Shared Space</span>
+    </div>
+    <div class="card">
+      <label>Room</label>
+      <input id="roomId" value="sector1" />
+      <button id="joinBtn" class="primary">Enter</button>
+      <button id="leaveBtn">Leave</button>
+    </div>
+    <div class="card">
+      <div id="micIndicator" title="Mic status"></div>
+      <button id="micBtn">Mic Off</button>
+      <label>Range (m)</label>
+      <input id="range" type="number" min="5" max="100" step="1" value="18" />
+    </div>
+  </div>
+  <div id="log"></div>
+  <script>
+  const PHOTON_APP_ID = "765f5538-6eec-4eb0-a3d7-b2cb92e6ea48"; // ✅ provided by Jonathan
+  const AGORA_APP_ID  = "65c9c87d18d64146b05753dddbaff97b";      // ✅ provided by Jonathan
+  const AGORA_TOKEN   = null; // Optional for quick tests (enable certificate & generate temp token later)
+
+  const logEl = document.getElementById('log');
+  function log(msg){ const p=document.createElement('div'); p.textContent=msg; logEl.appendChild(p); logEl.scrollTop=logEl.scrollHeight; }
+
+  // ====== THREE WORLD ======
+  const world = (()=>{
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x04070f);
+
+    const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+    camera.position.set(0, 1.7, 5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0x99bbff, 0x223344, 1.0);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6); dir.position.set(5,10,2); scene.add(dir);
+
+    // Floor
+    const floorGeo = new THREE.CircleGeometry(40, 48);
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x0b1022, metalness: 0.1, roughness: 0.9 });
+    const floor = new THREE.Mesh(floorGeo, floorMat); floor.rotation.x = -Math.PI/2; scene.add(floor);
+
+    // Controls
+    const controls = new THREE.PointerLockControls(camera, document.body);
+    document.body.addEventListener('click', ()=> controls.lock());
+
+    // Move
+    const keys = {}; window.addEventListener('keydown', e=> keys[e.code]=true); window.addEventListener('keyup', e=> keys[e.code]=false);
+    const dirVec = new THREE.Vector3();
+
+    // Other players containers
+    const peers = new Map(); // id -> {mesh}
+    const avatarGeo = new THREE.CapsuleGeometry(0.3, 1.2, 6, 12);
+    const avatarMat = new THREE.MeshStandardMaterial({ color: 0x4c6fff });
+
+    function spawnPeer(id){
+      if (peers.has(id)) return peers.get(id);
+      const m = new THREE.Mesh(avatarGeo, avatarMat.clone());
+      m.position.set(0, 0.9, 0);
+      scene.add(m);
+      peers.set(id, { mesh: m });
+      return peers.get(id);
+    }
+    function removePeer(id){ const p=peers.get(id); if(!p) return; scene.remove(p.mesh); peers.delete(id); }
+
+    // Resize
+    window.addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+    // Update loop
+    const clock = new THREE.Clock();
+    function tick(){
+      const dt = Math.min(clock.getDelta(), 0.05);
+      // Movement
+      dirVec.set(0,0,0);
+      if(keys['KeyW']) dirVec.z -= 1;
+      if(keys['KeyS']) dirVec.z += 1;
+      if(keys['KeyA']) dirVec.x -= 1;
+      if(keys['KeyD']) dirVec.x += 1;
+      dirVec.normalize();
+      const speed = 4.0;
+      // move in camera space
+      const forward = new THREE.Vector3(); camera.getWorldDirection(forward); forward.y = 0; forward.normalize();
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).negate();
+      const move = new THREE.Vector3();
+      move.addScaledVector(forward, dirVec.z * speed * dt);
+      move.addScaledVector(right, dirVec.x * speed * dt);
+      camera.position.add(move);
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    return { scene, camera, peers, spawnPeer, removePeer };
+  })();
+
+  // ====== VOICE (Agora) ======
+  const voice = (()=>{
+    let client = null; let localAudioTrack = null; const peers = new Map();
+    // Web Audio spatializer
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const masterGain = ctx.createGain(); masterGain.connect(ctx.destination);
+
+    function ensurePeer(uid){
+      if(peers.has(uid)) return peers.get(uid);
+      const panner = new PannerNode(ctx, { panningModel:'HRTF', distanceModel:'linear', refDistance:1, maxDistance:100, rolloffFactor:1 });
+      const gain = ctx.createGain(); gain.gain.value = 1; panner.connect(gain).connect(masterGain);
+      const obj = { panner, gain, source:null };
+      peers.set(uid, obj); return obj;
+    }
+
+    function setPeerPose(uid, x,y,z){ const p = peers.get(uid); if(!p) return; p.panner.positionX.value=x; p.panner.positionY.value=y; p.panner.positionZ.value=z; }
+    function setListenerPose(x,y,z, fx,fy,fz, ux,uy,uz){ const L = ctx.listener; L.positionX.value=x; L.positionY.value=y; L.positionZ.value=z; L.forwardX.value=fx; L.forwardY.value=fy; L.forwardZ.value=fz; L.upX.value=ux; L.upY.value=uy; L.upZ.value=uz; }
+    function setProximityGain(uid, dist, maxRange){ const p=peers.get(uid); if(!p) return; const d=Math.min(dist,maxRange); const g=1-(d/maxRange); p.gain.gain.value=Math.max(0,g); }
+
+    async function join(channel, uid=null){
+      client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+      await client.join(AGORA_APP_ID, channel, AGORA_TOKEN, uid || null);
+      localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack();
+      await client.publish([localAudioTrack]);
+      log('Agora joined: '+channel);
+
+      client.on("user-published", async (user, mediaType)=>{
+        await client.subscribe(user, mediaType);
+        if(mediaType === 'audio'){
+          const track = user.audioTrack;
+          const stream = new MediaStream([track.getMediaStreamTrack()]);
+          // Connect remote track to spatializer
+          const p = ensurePeer(user.uid);
+          if(p.source) p.source.disconnect();
+          p.source = ctx.createMediaStreamSource(stream);
+          p.source.connect(p.panner);
+        }
+      });
+      client.on("user-unpublished", (user)=>{ const p=peers.get(user.uid); if(p && p.source){ p.source.disconnect(); p.source=null; } });
+    }
+
+    async function leave(){ try{ if(localAudioTrack){ await localAudioTrack.close(); } if(client){ await client.leave(); } }catch(e){} }
+
+    async function enableMic(){ await localAudioTrack.setEnabled(true); document.getElementById('micIndicator').classList.add('live'); }
+    async function disableMic(){ await localAudioTrack.setEnabled(false); document.getElementById('micIndicator').classList.remove('live'); }
+
+    return { join, leave, setPeerPose, setListenerPose, setProximityGain, enableMic, disableMic };
+  })();
+
+  // ====== NETWORK (Photon Realtime JS) ======
+  const net = (()=>{
+    const { LoadBalancingClient, ClientState } = Photon.LoadBalancing;
+    const appVersion = "1.0";
+    const region = "us"; // change if needed
+
+    const listeners = { join:[], leave:[], state:[] };
+    let client = null; let joined = false; let stateTimer = null; let roomName = "";
+
+    function onStateChange(state){
+      if(state === ClientState.JoinedLobby){ client.joinOrCreateRoom(roomName); }
+      if(state === ClientState.Joined){ joined = true; log('Photon joined: '+roomName); listeners.join.forEach(f=>f(String(client.myActor().actorNr))); }
+      if(state === ClientState.Disconnected){ joined = false; log('Photon disconnected'); }
+    }
+
+    function join(room){
+      roomName = room;
+      client = new LoadBalancingClient(Photon.ConnectionProtocol.Wss, PHOTON_APP_ID, appVersion);
+      client.onStateChange = onStateChange;
+      client.onEvent = (ev)=>{
+        if(ev.Code === 1){ // transform event
+          const data = ev.Data; const id = String(ev.ActorNr);
+          listeners.state.forEach(f=> f({ id, pos:data.pos, rot:data.rot }));
+        }
+      };
+      client.onActorJoin = (actor)=>{ listeners.join.forEach(f=> f(String(actor.actorNr))); };
+      client.onActorLeave = (actor)=>{ listeners.leave.forEach(f=> f(String(actor.actorNr))); };
+      client.connectToRegionMaster(region);
+    }
+
+    function leave(){ if(!client) return; try{ client.leaveRoom(); client.disconnect(); }catch(e){} joined=false; if(stateTimer){ clearInterval(stateTimer); stateTimer=null; } listeners.leave.forEach(f=>f('self')); }
+
+    function sendState(px,py,pz, rx,ry,rz){ if(!joined) return; try{ client.raiseEvent(1, { pos:[px,py,pz], rot:[rx,ry,rz] }, { receivers: Photon.LoadBalancing.Constants.ReceiverGroup.Others }); }catch(e){} }
+
+    function onPeerJoin(cb){ listeners.join.push(cb); }
+    function onPeerLeave(cb){ listeners.leave.push(cb); }
+    function onState(cb){ listeners.state.push(cb); }
+
+    return { join, leave, sendState, onPeerJoin, onPeerLeave, onState };
+  })();
+
+  // ====== GLUE (proximity + sync) ======
+  const roomInput = document.getElementById('roomId');
+  const joinBtn = document.getElementById('joinBtn');
+  const leaveBtn = document.getElementById('leaveBtn');
+  const micBtn = document.getElementById('micBtn');
+  const rangeInput = document.getElementById('range');
+
+  joinBtn.onclick = async ()=>{
+    const room = roomInput.value.trim() || 'sector1';
+    net.join(room);
+    try{ await voice.join(room); }catch(e){ log('Agora error: '+e.message); }
+  };
+  leaveBtn.onclick = async ()=>{ net.leave(); await voice.leave(); };
+
+  micBtn.onclick = async ()=>{
+    if(micBtn.textContent.includes('Off')){ await voice.enableMic(); micBtn.textContent='Mic On'; } else { await voice.disableMic(); micBtn.textContent='Mic Off'; }
+  };
+
+  // Pose update + broadcast at ~8Hz
+  setInterval(()=>{
+    const cam = world.camera;
+    const forward = new THREE.Vector3(); cam.getWorldDirection(forward);
+    voice.setListenerPose(cam.position.x, cam.position.y, cam.position.z, forward.x, forward.y, forward.z, 0,1,0);
+    net.sendState(cam.position.x, cam.position.y, cam.position.z, 0, cam.rotation.y, 0);
+  }, 120);
+
+  // Handle network events
+  net.onPeerJoin((id)=>{ if(!world.peers.has(id)) world.spawnPeer(id); log('Peer joined: '+id); });
+  net.onPeerLeave((id)=>{ world.removePeer(id); log('Peer left: '+id); });
+  net.onState((payload)=>{
+    const { id, pos } = payload;
+    if(!world.peers.has(id)) world.spawnPeer(id);
+    const p = world.peers.get(id);
+    p.mesh.position.set(pos[0], Math.max(0.9, pos[1]-0.8), pos[2]);
+    // Spatial voice: set panner and proximity
+    voice.setPeerPose(id, pos[0], pos[1], pos[2]);
+    const cam = world.camera; const dist = cam.position.distanceTo(p.mesh.position); const maxR = parseFloat(rangeInput.value)||18; voice.setProximityGain(id, dist, maxR);
+  });
+  </script>
+</body>
+</html>
